@@ -1,0 +1,625 @@
+/*
+	Structure:
+		id: INTEGER PRIMARY KEY ASC AUTOINCREMENT;
+		sid: VARCHAR(22) NOT NULL // STEAM ID
+		nick: VARCHAR(64) NOT NULL // Nickname
+		registered: DOUBLE UNSIGNED NOT NULL DEFAULT 0 // Time first connected to server
+		modified: DOUBLE UNSIGNED NOT NULL DEFAULT 0 // Last modified time
+		warns: TINYINT UNSIGNED NOT NULL DEFAULT 0 // Current warning count
+		banned BIT NOT NULL DEFAULT 0 // Is banned?
+		banend DOUBLE UNSIGNED NOT NULL DEFAULT 0 // Ban end time
+		lastwarn: DOUBLE UNSIGNED NOT NULL DEFAULT 0 // Last warning time
+		lastban: DOUBLE UNSIGNED NOT NULL DEFAULT 0 // Last banned time
+		lastconn: DOUBLE UNSIGNED NOT NULL DEFAULT 0 // Last connected time
+		totalwarn: INTEGER UNSIGNED NOT NULL DEFAULT 0 // Total warning count
+		totalban: INTEGER UNSIGNED NOT NULL DEFAULT 0 // Total ban count
+*/
+
+local isValidSID = function(sid)
+	return string.find(string.upper(sid), "^STEAM_%d:%d:%d+$")
+end
+
+local isDupePl = function(tbl)
+	if !istable(tbl) then
+		return false
+	end
+	
+	return true
+end
+
+HSWarning.DB = {}
+
+HSWarning.DB.MSG_DUPE = "Duplicated players."
+HSWarning.DB.MSG_NO_COL_SPEC = "No column specified."
+HSWarning.DB.MSG_KV_NOT_MATCH = "keys and values does not match."
+HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET = "No both sid and nick specified."
+HSWarning.DB.MSG_NO_TIME_SET = "No time specified."
+HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH = "Sid format not matched."
+HSWarning.DB.MSG_NO_PLAYER_FROM_SID = "No such player from sid."
+HSWarning.DB.MSG_NO_PLAYER_FROM_NICK = "No such player from nick."
+HSWarning.DB.MSG_SID_NOT_VALID = "Sid is not valid."
+HSWarning.DB.MSG_NO_NICK_SET = "No nick is specified."
+HSWarning.DB.MSG_UNKNOWN_ERROR_GETTING_SID = "Unknown error while getting sid info."
+
+HSWarning.DB.TableName = "HSWarning"
+
+HSWarning.DB.WarnThreshold = 3
+
+HSWarning.DB.Init = function()
+	if !HSWarning.DB.TableExists() then
+		HSLog.d("Init", "No HSWaring table found! Creating... ")
+		HSWarning.DB.MakeTable()
+		HSLog.d("Init", "DONE!\n")
+	else
+		HSLog.a("Init", "HSWarning is ready.\n", true)
+	end
+end
+
+HSWarning.DB.TableExists = function()
+	return sql.TableExists(HSWarning.DB.TableName)
+end
+
+HSWarning.DB.MakeTable = function() 
+	sql.Query("CREATE TABLE IF NOT EXISTS " .. HSWarning.DB.TableName .. " (id INTEGER PRIMARY KEY ASC AUTOINCREMENT, sid VARCHAR(22) NOT NULL, nick VARCHAR(64) NOT NULL, registered DOUBLE UNSIGNED NOT NULL DEFAULT 0, modified DOUBLE UNSIGNED NOT NULL DEFAULT 0, warns TINYINT UNSIGNED NOT NULL DEFAULT 0, banned BIT NOT NULL DEFAULT 0, banend DOUBLE UNSIGNED NOT NULL DEFAULT 0, lastwarn DOUBLE UNSIGNED NOT NULL DEFAULT 0, lastban DOUBLE UNSIGNED NOT NULL DEFAULT 0, lastconn DOUBLE UNSIGNED NOT NULL DEFAULT 0, totalwarn INTEGER UNSIGNED NOT NULL DEFAULT 0, totalban INTEGER UNSIGNED NOT NULL DEFAULT 0)")
+end
+
+HSWarning.DB.PlayerExists = function(sid, nick)
+	if !HSWarning.DB.TableExists() then
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+	end
+	
+	local exists = false
+	if sid != nil then
+
+		local t = sql.Query("SELECT sid FROM " .. HSWarning.DB.TableName .. " WHERE sid = '" .. sid .. "'")
+		if t and table.Count(t) >= 1 then
+			exists = true
+		else
+			exists = false
+		end
+	else
+		local t = sql.Query("SELECT nick FROM " .. HSWarning.DB.TableName .. " WHERE nick LIKE '%" .. nick .. "%'")
+		if t and table.Count(t) >= 1 then
+			exists = true
+		else
+			exists = false
+		end
+	end	
+	return exists
+end
+
+HSWarning.DB.InitPlayer = function(pl)
+	local sid = "'" .. pl:SteamID() .. "'"
+	local nick = "'" .. pl:Nick() .. "'"
+	local registered = tostring(os.time())
+	if !HSWarning.DB.PlayerExists(sid) then
+		local registered = HSWarning.DB.SQLInsert({"'sid'", "'nick'", "'registered'"}, {sid, nick, registered})
+		if registered then
+			HSLog.a(nick .. "(" .. sid .. ")님의 정보가 경고 모듈에 등록되었습니다. 환영합니다.", true)
+		end
+	else
+		local connected = HSWarning.DB.SQLUpdate({"lastconn", "nick"}, {os.time(), nick}, "sid = " .. sid)
+		local banend = HSWarning.DB.GetBanEndTime(sid)
+		if banend > 0 and banend < os.time() then
+			HSWarning.DB.Unban(sid)
+		end
+		
+		local lastwarn = HSWarning.DB.GetLastWarn(sid)
+		if lastwarn > 0 and lastwarn + 86400 <= os.time() then
+			HSWarning.DB.AddWarn(sid, nil, -HSWarning.DB.GetWarn(sid))
+		end
+	end
+end
+hook.Add("PlayerInitialSpawn", "HSWarning.DB.InitPlayer", HSWarning.DB.InitPlayer)
+
+HSWarning.DB.NameCheckInit = function()
+	HSWarning.DB.NameCheck = function(pl, old, new)
+		local sid = "'" .. pl:SteamID() .. "'"
+		HSWarning.DB.SQLUpdate({"nick"}, {new}, "sid = " .. sid)
+		HSLog.d("NameCheck", "Name changed, old: " .. old .. ", new: " .. new)
+	end
+	hook.Add(ULib.HOOK_PLAYER_NAME_CHANGED, "HSWarning.DB.NameCheck", HSWarning.DB.NameCheck)
+end
+hook.Add("InitPostEntity", "HSWarning.DB.NameCheckInit", HSWarning.DB.NameCheckInit)
+
+local nextNameCheck = 0
+HSWarning.DB.NameCheckDelay = function()
+	local curtime = CurTime()
+	if nextNameCheck <= curtime then
+		for _, pl in pairs(player.GetAll()) do
+			local sid = "'" .. pl:SteamID() .. "'"
+			local old = HSWarning.DB.SQLQuery({"nick"}, "sid = " .. sid)
+			if !old or !old[1] then
+				continue
+			elseif !old[1]["nick"] then
+				old = "알 수 없음"
+			end
+			if istable(old) then
+				old = old[1]["nick"]
+			end
+			local new = pl:Nick()
+			
+			if old == new then
+				continue
+			end
+			HSWarning.DB.SQLUpdate({"nick"}, {new}, "sid = " .. sid)
+			HSLog.d("NameCheck", "Name changed, old: " .. old .. ", new: " .. new)
+		end
+		nextNameCheck = curtime + 60
+	end
+end
+hook.Add("Think", "HSWarning.DB.NameCheckDelay", HSWarning.DB.NameCheckDelay)
+
+HSWarning.DB.SQLQuery = function(col, where)
+	if !col or table.Count(col) == 0 then
+		HSLog.e("SQLQuery", HSWarning.DB.MSG_NO_COL_SPEC)
+		return false
+	end
+	
+	local query = sql.Query("SELECT " .. (istable(col) and table.concat(col, ", ") or col) .. " FROM " .. HSWarning.DB.TableName .. (where and " WHERE " .. where or ""))
+	
+	return query
+end
+
+HSWarning.DB.SQLInsert = function(keys, values)
+	if table.Count(keys) != table.Count(values) then
+		HSLog.e("SQLInsert", HSWarning.DB.MSG_KV_NOT_MATCH)
+		HSLog.e("SQLInsert", "Keys: ")
+		for _, v in pairs(keys) do
+			HSLog.e("SQLInsert", "\t" .. v)
+		end
+		
+		HSLog.e("SQLInsert", "Values: ")
+		for _, v in pairs(values) do
+			HSLog.e("SQLInsert", "\t" .. values)
+		end
+		
+		return false
+	end
+	
+	sql.Query("INSERT INTO " .. HSWarning.DB.TableName .. "(" .. table.concat(keys, ", ") .. ", modified) VALUES (" .. table.concat(values, ", ") .. ", " .. tostring(os.time()) .. ")")
+	HSLog.d("SQLInsert", "Query successed: keys [" .. table.concat(keys, ", ") .. "], values [" .. table.concat(values, ", ") .. "]")
+	return true
+end
+
+HSWarning.DB.SQLUpdate = function(keys, values, where)
+	if table.Count(keys) != table.Count(values) then
+		HSLog.e("SQLUpdate", HSWarning.DB.MSG_KV_NOT_MATCH)
+		HSLog.e("SQLUpdate", "Keys: ")
+		for _, v in pairs(keys) do
+			HSLog.e("SQLUpdate", "\t" .. v)
+		end
+		
+		HSLog.e("SQLUpdate", "Values: ")
+		for _, v in pairs(values) do
+			HSLog.e("SQLUpdate", "\t" .. values)
+		end
+		
+		return false
+	end
+	
+	local setstr = " SET "
+	for i = 1, table.Count(keys) do
+		if i == 1 then
+			setstr = setstr .. keys[i] .. " = '" .. values[i] .. "'"
+		else
+			setstr = setstr .. ", " .. keys[i] .. " = '" .. values[i] .. "'"
+		end
+	end
+	
+	setstr = setstr .. ", modified = " .. os.time()
+	
+	if where then
+		where = " WHERE " .. where
+	end
+	
+	sql.Query("UPDATE " .. HSWarning.DB.TableName .. setstr .. (where and where or ""))
+	HSLog.d("SQLUpdate", "Query successed: keys [" .. table.concat(keys, ", ") .. "], values [" .. table.concat(values, ", ") .. "]")
+	return true
+end
+
+HSWarning.DB.SetBan = function(sid, nick, time, pl)
+	if !sid and !nick then
+		HSLog.e("SetBan", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	if !time then
+		HSLog.e("SetBan", HSWarning.DB.MSG_NO_TIME_SET)
+		return false
+	end
+	
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("SetBan", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		
+		local curban = HSWarning.DB.GetBanEndTime(sid)
+		local query = HSWarning.DB.SQLUpdate({"banned", "banend", "lastban", "totalban"}, {"1", (curban > os.time() and curban + time or os.time() + time), os.time(), (HSWarning.DB.GetTotalBan(sid) or 0) + 1}, "sid = '" .. sid .. "'")
+		if !query then
+			return false
+		end
+		
+		ULib.addBan(sid, time, "Take too many warnings.", HSWarning.DB.GetNickFromSID(sid), pl and pl:Nick() or NULL)	
+		HSLog.a(HSWarning.DB.GetNickFromSID(sid) .. "님께서 경고 " .. HSWarning.DB.GetWarn(sid) .. "회를 받아 밴 처리되었습니다.")
+		return true
+	end
+end
+
+HSWarning.DB.Unban = function(sid, nick, time)
+	if !sid and !nick then
+		HSLog.e("SetBan", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	if isDupePl(sid) then
+		return false
+	end
+	
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("Unban", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		
+		local query = HSWarning.DB.SQLUpdate({"warns", "banned", "banend", "lastban"}, {"0", "0", "0", "0"})
+		if !query then
+			return false
+		end
+		
+		ULib.unban(sid)
+		HSLog.a(HSWarning.DB.GetNickFromSID(sid) .. "님께서 언밴 처리되었습니다.")
+		return true
+	end
+end
+
+HSWarning.DB.GetTotalBan = function(sid, nick)
+	if !sid and !nick then
+		HSLog.e("GetTotalBan", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	if isDupePl(sid) then
+		HSLog.e("GetTotalBan", HSWarning.DB.MSG_DUPE)
+		return false
+	end
+	
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("GetTotalBan", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		local t = HSWarning.DB.SQLQuery({"totalban"}, "sid = '" .. sid .. "'")
+		
+		if !t then
+			return false
+		end
+		
+		return tonumber(t[1]["totalban"])
+	else
+		return false
+	end
+end
+
+HSWarning.DB.GetBanEndTime = function(sid, nick)
+	if !sid and !nick then
+		HSLog.e("GetBanEndTime", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	if isDupePl(sid) then
+		HSLog.e("GetBanEndTime", HSWarning.DB.MSG_DUPE)
+		return false
+	end
+	
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("GetBanEndTime", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		local t = HSWarning.DB.SQLQuery({"banend"}, "sid = '" .. sid .. "'")
+		
+		if !t then
+			return false
+		end
+		
+		return tonumber(t[1]["banend"])
+	else
+		return false
+	end
+end
+
+HSWarning.DB.AddWarn = function(sid, nick, amount, pl)
+	if !sid and !nick then
+		HSLog.e("AddWarn", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	if isDupePl(sid) then
+		HSLog.e("AddWarn", HSWarning.DB.MSG_DUPE)
+		return false
+	end
+	
+	if !amount then
+		amount = 1
+	end
+	
+	local warn = 0	
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("AddWarn", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		
+		local curwarn = HSWarning.DB.GetWarn(sid, nil)
+		
+		if !curwarn then
+			return false
+		end
+		
+		local query = HSWarning.DB.SQLUpdate({"warns", "lastwarn", "totalwarn"}, {curwarn + amount, os.time(), ((HSWarning.DB.GetTotalWarn(sid) or 0) + amount)}, "sid = '" .. sid .. "'")
+		
+		if !query then
+			return false
+		end
+		
+		local nick = HSWarning.DB.GetNickFromSID(sid)
+		
+		warn = HSWarning.DB.GetWarn(sid)
+		
+		HSLog.a((nick and nick or sid) .. "의 경고 횟수: " .. warn .. "회")
+		
+		if warn >= 3 then
+			HSWarning.DB.SetBan(sid, nil, 1440, pl)
+		end
+		return true
+	else
+		return false
+	end
+end
+
+HSWarning.DB.GetWarn = function(sid, nick)
+	if !sid and !nick then
+		HSLog.e("GetWarn", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	local warns = 0
+
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("AddWarn", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		
+		local t = HSWarning.DB.SQLQuery({"warns"}, "sid = '" .. sid .. "'")
+		if !t or !t[1] then
+			HSLog.e("GetWarn", HSWarning.DB.MSG_NO_PLAYER_FROM_SID)
+			return false
+		end
+		
+		warns = t[1]["warns"]
+	else
+		return false
+	end
+	
+	return tonumber(warns)
+end
+
+HSWarning.DB.GetLastWarn = function(sid, nick)
+	if !sid and !nick then
+		HSLog.e("GetLastWarn", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	if isDupePl(sid) then
+		HSLog.e("GetLastWarn", HSWarning.DB.MSG_DUPE)
+		return false
+	end
+
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("GetLastWarn", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		
+		local t = HSWarning.DB.SQLQuery({"lastwarn"}, "sid = '" .. sid .. "'")
+		
+		if !t then
+			return false
+		end
+		
+		return tonumber(t[1]["lastwarn"])
+	else
+		return false
+	end
+end
+
+HSWarning.DB.GetTotalWarn = function(sid, nick)
+	if !sid and !nick then
+		HSLog.e("GetTotalWarn", HSWarning.DB.MSG_NO_BOTH_SID_NICK_SET)
+		return false
+	end
+	
+	if sid then
+		sid = string.Replace(sid, "'", "")
+		sid = string.upper(sid)
+	end
+	
+	if nick then
+		nick = string.Replace(nick, "'", "")
+		sid = HSWarning.DB.GetSIDFromNick(nick)
+	end
+	
+	if isDupePl(sid) then
+		HSLog.e("GetTotalWarn", HSWarning.DB.MSG_DUPE)
+		return false
+	end
+	
+	if sid then
+		if !isValidSID(sid) then
+			HSLog.e("GetTotalWarn", HSWarning.DB.MSG_SID_FORMAT_NOT_MATCH)
+			return false
+		end
+		local t = HSWarning.DB.SQLQuery({"totalwarn"}, "sid = '" .. sid .. "'")
+		
+		if !t then
+			return false
+		end
+		
+		return tonumber(t[1]["totalwarn"])
+	else
+		return false
+	end
+end
+
+HSWarning.DB.GetNickFromSID = function(sid)
+	if !isValidSID(sid) then
+		HSLog.e("GetNickFromSID", HSWarning.DB.MSG_SID_NOT_VALID)
+		return false
+	end
+	
+	sid = string.Replace(sid, "'", "")
+	sid = string.upper(sid)
+	
+	local nick = HSWarning.DB.SQLQuery({"nick"}, "sid = " .. sql.SQLStr(sid))
+	if !nick or !nick[1] then
+		HSLog.e("GetNickFromSID", HSWarning.DB.MSG_NO_PLAYER_FROM_SID)
+		return false
+	end
+	
+	return nick[1]["nick"]
+end
+
+HSWarning.DB.GetSIDFromNick = function(nick) 
+	if !nick then
+		HSLog.e("GetSIDFromNick", HSWarning.DB.MSG_NO_NICK_SET)
+		return false
+	end
+	
+	nick = string.Replace(nick, "'", "")
+	
+	local sid = nil
+	
+	local allp = player.GetAll()
+	local detected = {}
+	for _, v in pairs(allp) do
+		if string.find(string.lower(v:Nick()), string.lower(nick)) then
+			table.insert(detected, {v:Nick(), v:SteamID()})
+		end
+	end
+	
+	sid = HSWarning.DB.SQLQuery({"nick", "sid"}, "nick LIKE '%" .. nick .. "%'")
+	
+	if !sid then
+		HSLog.e("GetSIDFromNick", HSWarning.DB.MSG_NO_PLAYER_FROM_NICK)
+		return false
+	end
+	
+	for _, v in pairs(sid) do
+		local match = false
+		for _, w in pairs(detected) do
+			if v["sid"] == w[2] then
+				match = true
+				break
+			end
+		end
+		if !match then
+			table.insert(detected, {v["nick"], v["sid"]})
+		end
+	end
+	
+	if !detected or !detected[1] then
+		HSLog.e("GetNickFromSID", HSWarning.DB.MSG_NO_PLAYER_FROM_NICK)
+		return false
+	end
+
+	
+	if table.Count(detected) == 1 then
+		return detected[1][2]
+	elseif table.Count(detected) > 1 then
+		return detected
+	else
+		HSLog.e("GetNickFromSID", HSWarning.DB.MSG_UNKNOWN_ERROR_GETTING_SID)
+	end
+end

@@ -1,0 +1,109 @@
+local isValidSID = function(sid)
+	return string.find(string.upper(sid), "^STEAM_%d:%d:%d+$")
+end
+
+HSWarning = {}
+
+include("shared.lua")
+include("db.lua")
+
+HSWarning.Init = function()
+	util.AddNetworkString(HSWarning.NET_ADDWARN)
+	util.AddNetworkString(HSWarning.NET_UNBAN)
+	util.AddNetworkString(HSWarning.NET_GET_SID)
+	util.AddNetworkString(HSWarning.NET_SHOWWARN)
+	HSWarning.DB.Init()
+end
+hook.Add("Initialize", "HSWarning.Init", HSWarning.Init)
+
+HSWarning.ResponseWarn = function(len, pl)
+	if !pl:IsAdmin() then
+		pl:PrintMessage(HUD_PRINTTALK, "어드민이 아니라서 이 기능을 사용할 수 없습니다.")
+		HSLog.d("ResponseWarn", pl:Nick() .. "(" .. pl:SteamID() .. ")님이 권한 없는 경고를 시도했습니다.")
+		return
+	end
+	
+	local count = net.ReadInt(16)
+	local target = string.upper(net.ReadString())
+	target = string.Replace(target, "'", "")
+	
+	local res = nil
+	if isValidSID(target) then
+		res = HSWarning.DB.AddWarn(target, nil, count)
+	else
+		res = HSWarning.DB.AddWarn(nil, target, count)
+	end
+	
+	if !res then
+		pl:PrintMessage(HUD_PRINTTALK, "해당 닉네임의 유저가 둘 이상입니다.")
+		local users = HSWarning.DB.GetSIDFromNick(target)
+		
+		for _, v in pairs(users) do
+			pl:PrintMessage(HUD_PRINTTALK, "\t" .. v[1] .. " @ " .. v[2])
+		end
+	end
+end
+net.Receive(HSWarning.NET_ADDWARN, HSWarning.ResponseWarn)
+
+HSWarning.ResponseUnban = function(len, pl)
+	if !pl:IsAdmin() then
+		pl:PrintMessage(HUD_PRINTTALK, "어드민이 아니라서 이 기능을 사용할 수 없습니다.")
+		HSLog.d("ResponseUnban", pl:Nick() .. "(" .. pl:SteamID() .. ")님이 권한 없는 언밴을 시도했습니다.")
+		return
+	end
+	
+	local target = net.ReadString()
+	
+	if isValidSID(target) then
+		HSWarning.DB.Unban(target)
+	else
+		local unban = HSWarning.DB.Unban(nil, target)
+		if !unban then
+			pl:PrintMessage(HUD_PRINTTALK, "해당 문자열을 포함한 플레이어가 둘 이상입니다.")
+		end
+	end
+end
+net.Receive(HSWarning.NET_UNBAN, HSWarning.ResponseUnban)
+
+HSWarning.ResponseGetSID = function(len, pl)
+	local text = net.ReadString()
+	if !text or string.len(text) <= 0 then
+		return false
+	end
+	
+	local sids = HSWarning.DB.GetSIDFromNick(text)
+	if istable(sids) then
+		for i, v in pairs(sids) do
+			pl:PrintMessage(HUD_PRINTTALK, i .. ": " .. v[1] .. "\t\t" .. v[2])
+		end
+	end
+end
+net.Receive(HSWarning.NET_GET_SID, HSWarning.ResponseGetSID)
+
+HSWarning.ResponseShowWarn = function(len, pl)
+	local target = net.ReadString()
+	
+	if !target or string.len(target) == 0 then
+		pl:PrintMessage(HUD_PRINTTALK, pl:Nick() .. "님의 경고 횟수는 " .. HSWarning.DB.GetWarn(pl:SteamID()) .. "회 입니다.")
+	else
+		if isValidSID(target) then
+			pl:PrintMessage(HUD_PRINTTALK, HSWarning.DB.GetNickFromSID(target) .. "님의 경고 횟수는 " .. HSWarning.DB.GetWarn(target) .. "회 입니다.")
+		else
+			local sid = HSWarning.DB.GetSIDFromNick(target)
+			if !sid then
+				pl:PrintMessage(HUD_PRINTTALK, "해당되는 플레이어가 없습니다.")
+				return
+			end
+			if istable(sid) then
+				pl:PrintMessage(HUD_PRINTTALK, "해당 문자열을 포함한 닉네임의 유저가 둘 이상입니다.")
+				PrintTable(sid)
+				for _, v in pairs(sid) do
+					pl:PrintMessage(HUD_PRINTTALK, tostring(v[1]) .. " : " .. tostring(v[2]))
+				end
+			else
+				pl:PrintMessage(HUD_PRINTTALK, HSWarning.DB.GetNickFromSID(sid) .. "님의 경고 횟수는 " .. HSWarning.DB.GetWarn(sid) .. "회 입니다.")
+			end
+		end
+	end
+end
+net.Receive(HSWarning.NET_SHOWWARN, HSWarning.ResponseShowWarn)

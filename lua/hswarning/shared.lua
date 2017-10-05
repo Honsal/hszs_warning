@@ -1,0 +1,5 @@
+HSWarning.NET_ADDWARN = "HSWarning.AddWarn"
+HSWarning.NET_UNBAN = "HSWarning.Unban"
+HSWarning.NET_GET_SID = "HSWarning.GetSID"
+HSWarning.NET_SHOWWARN = "HSWarning.ShowWarn"
+HSWarning.NET_SHOWTOTALWARN = "HSWarning.ShowTotalWarn"
