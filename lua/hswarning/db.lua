@@ -466,6 +466,49 @@ HSWarning.DB.AddWarn = function(sid, nick, amount, pl)
 	end
 end
 
+HSWarning.DB.AddWarnDiscord = function(sid, nick, amount, discordNick)
+	if HSWarning.DB.LastWarnTime + 1.5 <= CurTime() then
+		if sid then
+			sid = sql.SQLStr(sid)
+		end
+		
+		if nick then
+			nick = sql.SQLStr(nick)
+			sid = HSWarning.DB.GetSIDFromNick(nick)
+			
+			checkSID(sid, NULL)
+			
+			sid = sql.SQLStr(sid)
+		end
+		
+		if !sid then
+			error("Unknown Error")
+		end
+		
+		local ostime = os.time()
+		
+		HSWarning.DB.SQLUpdate({"warns", "lastwarn", "totalwarn"}, {HSWarning.DB.GetWarns(sid, nil, NULL) + amount, sql.SQLStr(tostring(ostime)), HSWarning.DB.GetTotalWarn(sid, nil, NULL) + amount}, "sid = " .. sid)
+		
+		if HSWarning.DB.GetWarns(sid) >= HSWarning.DB.WarnThreshold then
+			local totalwarn = HSWarning.DB.GetTotalWarn(sid)
+			
+			if (totalwarn <= 10) then
+				HSWarning.DB.SetBan(sid, nil, 86400, NULL)
+			else 
+				local add = (totalwarn - 10) * 6 * 60 * 60
+				HSWarning.DB.SetBan(sid, nil, 86400 + add, NULL)
+			end
+		end
+		
+		nick = HSWarning.DB.GetNickFromSID(sid)
+		HSLog.a("[DISCORD]" .. discordNick .. "님께서" .. nick .. "님께 경고 " .. tostring(amount) .. "회를 부여하여")
+		HSLog.a(nick .. "님의 경고 횟수가 " .. tostring(HSWarning.DB.GetWarns(sid)) .. "회가 되었습니다.")
+		HSWarning.DB.LastWarnTime = CurTime()
+	else
+		HSLog.a("다음 경고까지 " .. tostring((HSWarning.DB.LastWarnTime + 1.5) - CurTime()) .. " 초 기다려야 합니다.")
+	end
+end
+
 HSWarning.DB.GetWarns = function(sid, nick, pl)
 	if sid then
 		sid = sql.SQLStr(sid)
